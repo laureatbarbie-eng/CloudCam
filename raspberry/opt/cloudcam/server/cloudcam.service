@@ -1,0 +1,16 @@
+[Unit]
+Description=CloudCam Receiver + Coordinator (Gunicorn)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/cloudcam/server
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/usr/bin/gunicorn -w 2 -b 0.0.0.0:8000 app:app
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
