@@ -588,15 +588,6 @@ static bool uploadImageResumable(camera_fb_t *fb, int cycleId) {
   return false;
 }
 
-// ------------------- Memory Diagnostics -------------------
-static void printHeapInfo(const char* location) {
-  Serial.printf("[MEM] %s: Free heap=%u Min free=%u PSRAM free=%u\n", 
-                location, 
-                ESP.getFreeHeap(), 
-                ESP.getMinFreeHeap(),
-                ESP.getFreePsram());
-}
-
 // ------------------- Main -------------------
 void setup() {
   Serial.begin(921600);
@@ -612,11 +603,11 @@ void setup() {
 
   blinkStatus(2, 120, 120);
   
-  // Диагностика памяти при старте
-  printHeapInfo("BOOT");
-  
   startCameraOV5640();
-  printHeapInfo("AFTER_CAMERA_INIT");
+  Serial.printf("[MEM] Free heap=%u Min free=%u PSRAM free=%u\n", 
+                ESP.getFreeHeap(), 
+                ESP.getMinFreeHeap(),
+                ESP.getFreePsram());
 
   uint32_t tBoot = ms();
 
@@ -626,13 +617,19 @@ void setup() {
     goToSleep(FAIL_SLEEP_SEC);
   }
   Serial.printf("[TIMING] wifi_connect=%u ms rssi=%d\n", (ms() - t0), WiFi.RSSI());
-  printHeapInfo("AFTER_WIFI");
+  Serial.printf("[MEM] AFTER_WIFI: Free heap=%u Min free=%u PSRAM free=%u\n", 
+                ESP.getFreeHeap(), 
+                ESP.getMinFreeHeap(),
+                ESP.getFreePsram());
 
   // SNTP необязателен (не прерываем программу при неудаче)
   t0 = ms();
   bool timeOk = syncTimeSNTP();
   Serial.printf("[TIMING] sntp=%u ms ok=%s\n", (ms() - t0), timeOk ? "true" : "false");
-  printHeapInfo("AFTER_SNTP");
+  Serial.printf("[MEM] AFTER_SNTP: Free heap=%u Min free=%u PSRAM free=%u\n", 
+                ESP.getFreeHeap(), 
+                ESP.getMinFreeHeap(),
+                ESP.getFreePsram());
 
   int cycleId = -1, captureDelayMs = -1;
   t0 = ms();
@@ -641,7 +638,10 @@ void setup() {
     goToSleep(FAIL_SLEEP_SEC);
   }
   Serial.printf("[TIMING] hello=%u ms cycle_id=%d capture_delay=%d\n", (ms() - t0), cycleId, captureDelayMs);
-  printHeapInfo("AFTER_HELLO");
+  Serial.printf("[MEM] AFTER_HELLO: Free heap=%u Min free=%u PSRAM free=%u\n", 
+                ESP.getFreeHeap(), 
+                ESP.getMinFreeHeap(),
+                ESP.getFreePsram());
 
   int cmdCaptureDelayMs = -1;
   t0 = ms();
@@ -650,7 +650,10 @@ void setup() {
     goToSleep(FAIL_SLEEP_SEC);
   }
   Serial.printf("[TIMING] waitcmd=%u ms capture_delay=%d\n", (ms() - t0), cmdCaptureDelayMs);
-  printHeapInfo("AFTER_WAITCMD");
+  Serial.printf("[MEM] AFTER_WAITCMD: Free heap=%u Min free=%u PSRAM free=%u\n", 
+                ESP.getFreeHeap(), 
+                ESP.getMinFreeHeap(),
+                ESP.getFreePsram());
 
   // Синхронная съёмка
   int waitMs = cmdCaptureDelayMs;
@@ -665,15 +668,24 @@ void setup() {
 
   if (!fb) {
     Serial.println("[ERR] Capture FAILED - no frame buffer");
-    printHeapInfo("CAPTURE_FAILED");
+    Serial.printf("[MEM] CAPTURE_FAILED: Free heap=%u Min free=%u PSRAM free=%u\n", 
+                  ESP.getFreeHeap(), 
+                  ESP.getMinFreeHeap(),
+                  ESP.getFreePsram());
     goToSleep(FAIL_SLEEP_SEC);
   }
   Serial.printf("[TIMING] capture=%u ms jpeg_bytes=%u\n", captureMs, fb->len);
-  printHeapInfo("AFTER_CAPTURE");
+  Serial.printf("[MEM] AFTER_CAPTURE: Free heap=%u Min free=%u PSRAM free=%u\n", 
+                ESP.getFreeHeap(), 
+                ESP.getMinFreeHeap(),
+                ESP.getFreePsram());
 
   bool uploaded = uploadImageResumable(fb, cycleId);
   esp_camera_fb_return(fb);
-  printHeapInfo("AFTER_UPLOAD_RETURN");
+  Serial.printf("[MEM] AFTER_UPLOAD_RETURN: Free heap=%u Min free=%u PSRAM free=%u\n", 
+                ESP.getFreeHeap(), 
+                ESP.getMinFreeHeap(),
+                ESP.getFreePsram());
 
   if (!uploaded) {
     Serial.println("[ERR] Upload FAILED - going to sleep");
@@ -688,7 +700,10 @@ void setup() {
   Serial.printf("[TIMING] waitack=%u ms sleep=%s\n", (ms() - t0), sleepFlag ? "true" : "false");
 
   Serial.printf("[TIMING] total_awake=%u ms\n", (ms() - tBoot));
-  printHeapInfo("BEFORE_SLEEP");
+  Serial.printf("[MEM] BEFORE_SLEEP: Free heap=%u Min free=%u PSRAM free=%u\n", 
+                ESP.getFreeHeap(), 
+                ESP.getMinFreeHeap(),
+                ESP.getFreePsram());
   digitalWrite(STATUS_LED_GPIO, HIGH);
   goToSleep(CAPTURE_PERIOD_SEC);
 }
