@@ -269,11 +269,15 @@ static void startCameraOV5640() {
     while (true) delay(1000);
   }
 
-  config.frame_size = FRAMESIZE_QXGA;
+  // Оптимальные настройки для OV2640 на ESP32-CAM
+  // FRAMESIZE_UXGA (1600x1200) - баланс между качеством и стабильностью
+  // jpeg_quality = 12 - хорошее качество для облаков при разумном размере файла (~150-250KB)
+  // fb_count = 2 - двойная буферизация в PSRAM для предотвращения зависаний
+  config.frame_size = FRAMESIZE_UXGA;
   config.jpeg_quality = 10;
-  config.fb_count = 1;
+  config.fb_count = 2;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.grab_mode = CAMERA_GRAB_LATEST;
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
@@ -293,14 +297,15 @@ static void startCameraOV5640() {
     s->set_gainceiling(s, (gainceiling_t)2);
     s->set_lenc(s, 1);
     s->set_raw_gma(s, 1);
-    s->set_bpc(s, 0);
+    s->set_bpc(s, 1);
     s->set_wpc(s, 1);
     s->set_hmirror(s, 0);
     s->set_vflip(s, 0);
   }
   
-  Serial.println("[OK] OV5640 initialized");
-  Serial.printf("[INFO] Resolution: QXGA (2048x1536), XCLK: 20MHz\n");
+  Serial.println("[OK] OV2640 initialized");
+  Serial.printf("[INFO] Resolution: UXGA (1600x1200), Quality: 12, Buffers: 2, XCLK: 20MHz\n");
+
 }
 
 // ------------------- API Calls -------------------
