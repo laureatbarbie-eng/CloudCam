@@ -1,4 +1,5 @@
-from flask import Flask, request, jsonify, abort
+import os, uuid
+from flask import Flask, request, jsonify
 from pathlib import Path
 from datetime import datetime
 import time, json, threading
@@ -8,12 +9,13 @@ app = Flask(__name__)
 CONFIG_PATH = Path(__file__).with_name("config.json")
 cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 
-HOST = cfg["listen_host"]
-PORT = int(cfg["listen_port"])
+HOST = cfg.get("listen_host", "0.0.0.0")
+PORT = int(cfg.get("listen_port", 8000))
 CAM_IDS = list(cfg["cam_ids"])
 CAPTURE_PERIOD_SEC = int(cfg["capture_period_sec"])
 CAPTURE_LEAD_MS = int(cfg["capture_lead_ms"])
 STORAGE_DIR = Path(cfg["storage_dir"])
+API_TOKEN = cfg.get("api_token", "SecretCloudToken123")
 
 LOCK = threading.Lock()
 state = {
@@ -23,6 +25,7 @@ state = {
     "received": set(),
     "cmd": None,
     "cmd_ts": None,
+    "transfers": {} # Для управления загрузкой чанков
 }
 
 def now_ms() -> int:
@@ -33,11 +36,6 @@ def cycle_dir(camid: str) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     return d
 
-def results_dir() -> Path:
-    d = STORAGE_DIR / "results"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
 def new_cycle():
     state["cycle_id"] += 1
     state["cycle_start"] = time.time()
@@ -45,132 +43,129 @@ def new_cycle():
     state["received"] = set()
     state["cmd"] = None
     state["cmd_ts"] = None
+    state["transfers"].clear()
+
+@app.before_request
+def check_auth():
+    if request.endpoint == "health": return
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {API_TOKEN}":
+        return jsonify(error="Unauthorized"), 401
 
 @app.get("/health")
 def health():
     with LOCK:
-        return jsonify(status="ok", cycle_id=state["cycle_id"], hello=sorted(list(state["hello"])),
-                       received=sorted(list(state["received"])))
+        return jsonify(status="ok", cycle_id=state["cycle_id"])
 
 @app.post("/hello")
 def hello():
-    if not request.is_json:
-        return jsonify(error="expected JSON"), 400
     deviceid = request.json.get("deviceid")
-    if deviceid not in CAM_IDS:
-        return jsonify(error=f"unknown deviceid {deviceid}"), 400
+    if deviceid not in CAM_IDS: return jsonify(error="unknown device"), 400
 
     with LOCK:
         state["hello"].add(deviceid)
-
-        # если команды ещё нет и обе камеры (или хотя бы одна) объявились, планируем CAPTURE_AT
         if state["cmd"] is None:
             tcap = now_ms() + CAPTURE_LEAD_MS
-            state["cmd"] = {"type": "CAPTURE_AT", "cycle_id": state["cycle_id"], "t_capture_ms": tcap, "server_ms": now_ms()}
+            state["cmd"] = {"type": "CAPTURE_AT", "cycle_id": state["cycle_id"], "capture_delay_ms": CAPTURE_LEAD_MS}
             state["cmd_ts"] = time.time()
-
-        return jsonify(cycle_id=state["cycle_id"], server_ms=now_ms())
+        
+        delay_ms = max(0, state["cmd"]["capture_delay_ms"])
+        return jsonify(cycle_id=state["cycle_id"], capture_delay_ms=delay_ms)
 
 @app.get("/waitcmd")
 def waitcmd():
-    deviceid = request.args.get("deviceid")
     cycle_id = int(request.args.get("cycle_id", "-1"))
-    if deviceid not in CAM_IDS:
-        return jsonify(error="unknown deviceid"), 400
-
     t0 = time.time()
-    LONGPOLL_SEC = 25.0
-    while time.time() - t0 < LONGPOLL_SEC:
+    while time.time() - t0 < 25.0:
         with LOCK:
             if cycle_id != state["cycle_id"]:
-                return jsonify(type="NEWCYCLE", cycle_id=state["cycle_id"], server_ms=now_ms())
+                return jsonify(type="NEWCYCLE", cycle_id=state["cycle_id"])
             if state["cmd"] is not None:
-                # обновим server_ms на момент ответа (важно для CAPTURE_AT выравнивания)
-                out = dict(state["cmd"])
-                out["server_ms"] = now_ms()
-                return jsonify(out)
+                return jsonify(state["cmd"])
         time.sleep(0.05)
+    return jsonify(type="WAIT", cycle_id=state["cycle_id"])
 
-    return jsonify(type="WAIT", cycle_id=state["cycle_id"], server_ms=now_ms())
+# --- Исправленный блок загрузки ---
 
-@app.post("/upload")
-def upload():
-    camid = request.args.get("camid") or request.form.get("camid")
-    cycle_id = request.args.get("cycle_id") or request.form.get("cycle_id")
-    if camid not in CAM_IDS:
-        return jsonify(error="unknown camid"), 400
-    if "file" not in request.files:
-        return jsonify(error="no file field"), 400
-
-    f = request.files["file"]
-    if not f or not f.filename:
-        return jsonify(error="empty filename"), 400
-
-    meta_raw = request.form.get("meta", "")
-    meta = None
-    if meta_raw:
-        try:
-            meta = json.loads(meta_raw)
-        except Exception:
-            meta = {"_parse_error": True, "raw": meta_raw}
-
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    base = f"{state['cycle_id']}_{ts}"
-
-    out_jpg = cycle_dir(camid) / f"{base}.jpg"
-    out_json = cycle_dir(camid) / f"{base}.json"
-
-    f.save(out_jpg)
-
-    meta_to_save = {
-        "cycle_id_server": state["cycle_id"],
-        "cycle_id_arg": cycle_id,
-        "camid": camid,
-        "rx_server_ms": now_ms(),
-        "jpg_path": str(out_jpg),
-        "meta": meta
-    }
-    out_json.write_text(json.dumps(meta_to_save, ensure_ascii=False, indent=2), encoding="utf-8")
-
+@app.post("/upload/init")
+def upload_init():
+    req = request.json
+    cam_id = req.get("cam_id")
+    cycle_id = req.get("cycle_id")
+    
+    tid = str(uuid.uuid4())
+    temp_path = cycle_dir(cam_id) / f"temp_{tid}.jpg"
+    
     with LOCK:
-        state["received"].add(camid)
+        state["transfers"][tid] = {
+            "cam_id": cam_id,
+            "cycle_id": cycle_id,
+            "file_path": temp_path,
+            "chunk_size": req.get("chunk_size", 2048),
+            "meta": req
+        }
+    return jsonify(transfer_id=tid, resume_from_chunk=0)
 
-    return jsonify(saved=str(out_jpg), meta=str(out_json), camid=camid, cycle_id=state["cycle_id"])
+@app.post("/upload/chunk")
+def upload_chunk():
+    tid = request.headers.get("X-Transfer-ID")
+    idx = int(request.headers.get("X-Chunk-Index", 0))
+    data = request.get_data()
+    
+    with LOCK:
+        t = state["transfers"].get(tid)
+        if not t: return jsonify(error="Invalid TID"), 400
+        
+        offset = idx * t["chunk_size"]
+        mode = "r+b" if t["file_path"].exists() else "wb"
+        with open(t["file_path"], mode) as f:
+            f.seek(offset)
+            f.write(data)
+            
+    return "OK"
+
+@app.post("/upload/finalize")
+def upload_finalize():
+    tid = request.json.get("transfer_id")
+    with LOCK:
+        t = state["transfers"].get(tid)
+        if not t: return jsonify(error="Invalid TID"), 400
+        
+        cam_id = t["cam_id"]
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        base = f"{t['cycle_id']}_{ts}"
+        
+        final_jpg = cycle_dir(cam_id) / f"{base}.jpg"
+        final_json = cycle_dir(cam_id) / f"{base}.json"
+        
+        os.rename(t["file_path"], final_jpg)
+        final_json.write_text(json.dumps(t["meta"], indent=2), encoding="utf-8")
+        
+        state["received"].add(cam_id)
+        del state["transfers"][tid]
+        
+    return jsonify(status="ok")
+
+# ----------------------------------
 
 @app.get("/waitack")
 def waitack():
-    deviceid = request.args.get("deviceid")
     cycle_id = int(request.args.get("cycle_id", "-1"))
-    if deviceid not in CAM_IDS:
-        return jsonify(error="unknown deviceid"), 400
-
     t0 = time.time()
-    LONGPOLL_SEC = 25.0
-    UPLOAD_WAIT_SEC = 70.0  # окно ожидания, чтобы обе камеры успели загрузить при плохом Wi‑Fi
-
-    while time.time() - t0 < LONGPOLL_SEC:
+    while time.time() - t0 < 25.0:
         with LOCK:
             if cycle_id != state["cycle_id"]:
-                return jsonify(type="NEWCYCLE", cycle_id=state["cycle_id"], sleep=False, server_ms=now_ms())
+                return jsonify(type="NEWCYCLE", cycle_id=state["cycle_id"], sleep=False)
 
             complete = (state["received"] == set(CAM_IDS))
-            timed_out = (state["cmd_ts"] is not None and (time.time() - state["cmd_ts"] > UPLOAD_WAIT_SEC))
+            timed_out = (state["cmd_ts"] is not None and (time.time() - state["cmd_ts"] > 70.0))
 
             if complete or timed_out:
-                ack = {
-                    "cycle_id": state["cycle_id"],
-                    "complete": complete,
-                    "received": sorted(list(state["received"])),
-                    "sleep": True,
-                    "next_wake_sec": CAPTURE_PERIOD_SEC,
-                    "server_ms": now_ms(),
-                }
+                ack = {"cycle_id": state["cycle_id"], "sleep": True}
                 new_cycle()
                 return jsonify(ack)
-
         time.sleep(0.05)
-
-    return jsonify(type="WAIT", cycle_id=state["cycle_id"], sleep=False, server_ms=now_ms())
+    return jsonify(type="WAIT", cycle_id=state["cycle_id"], sleep=False)
 
 if __name__ == "__main__":
     app.run(host=HOST, port=PORT, threaded=True)

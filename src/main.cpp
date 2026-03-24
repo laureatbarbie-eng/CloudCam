@@ -11,9 +11,12 @@ static const char* SERVER_HOST = "192.168.4.1";
 static const uint16_t SERVER_PORT = 8000;
 static const char* CAM_ID = "cam160";
 
+// ДОБАВЛЕНО: API Токен для авторизации на сервере
+static const char* API_TOKEN = "SecretCloudToken123";
+
 static const uint32_t CAPTURE_PERIOD_SEC = 600;
 static const uint32_t FAIL_SLEEP_SEC = 120;
-static const uint32_t CHUNK_SIZE = 2048;
+static const uint32_t CHUNK_SIZE = 8192;
 static const uint8_t UPLOAD_MAX_RETRIES = 3;
 static const uint8_t CHUNK_MAX_RETRIES = 5;
 
@@ -29,12 +32,15 @@ static const uint32_t HTTP_SOCK_TIMEOUT_MS = 5000;
 static const uint32_t CHUNK_SOCK_TIMEOUT_MS = 8000;
 
 static const bool WIFI_DISABLE_SLEEP = true;
-static const bool WIFI_MAX_TXPOWER = true;
+static const bool WIFI_MAX_TXPOWER = false;
 
 static const size_t TCP_WRITE_BLOCK = 1460;
 
 #define LED_FLASH_GPIO GPIO_NUM_4
 #define STATUS_LED_GPIO GPIO_NUM_33
+
+// Глобальный буфер для HTTP запросов (избегаем кучи String в цикле)
+static char httpBodyBuffer[256];
 
 // ------------------- CRC32 -------------------
 static uint32_t crc32_table[256];
@@ -79,6 +85,11 @@ static void blinkStatus(uint8_t times, uint16_t onms, uint16_t offms) {
   }
 }
 
+// ДОБАВЛЕНО: Генерация заголовка авторизации
+static String getAuthHeader() {
+  return String("Authorization: Bearer ") + API_TOKEN + "\r\n";
+}
+
 static bool readLine(WiFiClient &c, String &line, uint32_t timeoutMs) {
   line = "";
   uint32_t t0 = ms();
@@ -104,14 +115,21 @@ static bool httpRequestRaw(const String &req, HttpResp &out, uint32_t totalTimeo
   out = HttpResp();
 
   WiFiClient client;
-  if (!client.connect(SERVER_HOST, SERVER_PORT)) return false;
+  if (!client.connect(SERVER_HOST, SERVER_PORT)) {
+    Serial.println("[ERR] HTTP: Failed to connect");
+    return false;
+  }
   client.setTimeout(HTTP_SOCK_TIMEOUT_MS);
+  client.setNoDelay(true);
 
   client.print(req);
   uint32_t t0 = ms();
 
   String statusLine;
-  if (!readLine(client, statusLine, 3000)) { client.stop(); return false; }
+  if (!readLine(client, statusLine, 3000)) { 
+    client.stop(); 
+    return false; 
+  }
 
   int sp = statusLine.indexOf(' ');
   if (sp < 0) { client.stop(); return false; }
@@ -206,8 +224,12 @@ static bool connectWiFi(uint32_t timeoutMs) {
     delay(50);
     esp_task_wdt_reset();
   }
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[ERR] WiFi connection failed");
+    return false;
+  }
   wifiTuneAfterConnect();
+  Serial.printf("[WIFI] Connected IP=%s RSSI=%d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
   return true;
 }
 
@@ -238,8 +260,9 @@ static bool syncTimeSNTP() {
   return false;
 }
 
-// ------------------- Camera Init OV5640 -------------------
-static void startCameraOV5640() {
+// ИСПРАВЛЕНО: переименовано в OV2640 (так как настройки именно для неё)
+// ------------------- Camera Init OV2640 -------------------
+static void startCameraOV2640() {
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -261,7 +284,7 @@ static void startCameraOV5640() {
   config.pin_pwdn = 32;
   config.pin_reset = -1;
 
-  config.xclk_freq_hz = 20000000;
+  config.xclk_freq_hz = 10000000;
   config.pixel_format = PIXFORMAT_JPEG;
 
   if (!psramFound()) {
@@ -270,9 +293,6 @@ static void startCameraOV5640() {
   }
 
   // Оптимальные настройки для OV2640 на ESP32-CAM
-  // FRAMESIZE_UXGA (1600x1200) - баланс между качеством и стабильностью
-  // jpeg_quality = 12 - хорошее качество для облаков при разумном размере файла (~150-250KB)
-  // fb_count = 2 - двойная буферизация в PSRAM для предотвращения зависаний
   config.frame_size = FRAMESIZE_UXGA;
   config.jpeg_quality = 10;
   config.fb_count = 2;
@@ -304,8 +324,7 @@ static void startCameraOV5640() {
   }
   
   Serial.println("[OK] OV2640 initialized");
-  Serial.printf("[INFO] Resolution: UXGA (1600x1200), Quality: 12, Buffers: 2, XCLK: 20MHz\n");
-
+  Serial.printf("[INFO] Resolution: UXGA (1600x1200), Quality: 10, Buffers: 2, XCLK: 20MHz\n");
 }
 
 // ------------------- API Calls -------------------
@@ -314,6 +333,7 @@ static bool postHello(int &cycleIdOut, int &delayMsOut) {
   String req =
       String("POST /hello HTTP/1.1\r\n") +
       "Host: " + SERVER_HOST + ":" + String(SERVER_PORT) + "\r\n" +
+      getAuthHeader() +
       "Connection: close\r\n" +
       "Content-Type: application/json\r\n" +
       "Content-Length: " + String(payload.length()) + "\r\n\r\n" +
@@ -339,6 +359,7 @@ static bool waitCmd(int cycleId, int &captureMsOut) {
     String req =
         String("GET ") + path + " HTTP/1.1\r\n" +
         "Host: " + SERVER_HOST + ":" + String(SERVER_PORT) + "\r\n" +
+        getAuthHeader() +
         "Connection: close\r\n\r\n";
 
     HttpResp r;
@@ -364,6 +385,7 @@ static bool waitAck(int cycleId, bool &sleepOut) {
     String req =
         String("GET ") + path + " HTTP/1.1\r\n" +
         "Host: " + SERVER_HOST + ":" + String(SERVER_PORT) + "\r\n" +
+        getAuthHeader() +
         "Connection: close\r\n\r\n";
 
     HttpResp r;
@@ -395,6 +417,7 @@ static bool initUpload(int cycleId, size_t jpegSize, uint32_t jpegCrc, String &t
   String req =
       String("POST /upload/init HTTP/1.1\r\n") +
       "Host: " + SERVER_HOST + ":" + String(SERVER_PORT) + "\r\n" +
+      getAuthHeader() +
       "Connection: close\r\n" +
       "Content-Type: application/json\r\n" +
       "Content-Length: " + String(payload.length()) + "\r\n\r\n" +
@@ -418,7 +441,10 @@ static bool uploadChunk(const String &transferId, int chunkIndex, const uint8_t 
   uint32_t chunkCrc = crc32(data, len);
 
   WiFiClient client;
-  if (!client.connect(SERVER_HOST, SERVER_PORT)) return false;
+  if (!client.connect(SERVER_HOST, SERVER_PORT)) {
+    Serial.printf("[ERR] Chunk %d: Failed to connect\n", chunkIndex);
+    return false;
+  }
 
   client.setTimeout(CHUNK_SOCK_TIMEOUT_MS);
   client.setNoDelay(true);
@@ -426,6 +452,7 @@ static bool uploadChunk(const String &transferId, int chunkIndex, const uint8_t 
   String headers =
       String("POST /upload/chunk HTTP/1.1\r\n") +
       "Host: " + SERVER_HOST + ":" + String(SERVER_PORT) + "\r\n" +
+      getAuthHeader() +
       "Connection: close\r\n" +
       "X-Transfer-ID: " + transferId + "\r\n" +
       "X-Chunk-Index: " + String(chunkIndex) + "\r\n" +
@@ -442,10 +469,15 @@ static bool uploadChunk(const String &transferId, int chunkIndex, const uint8_t 
   while (remaining > 0) {
     size_t blk = (remaining > TCP_WRITE_BLOCK) ? TCP_WRITE_BLOCK : remaining;
     size_t w = client.write(ptr, blk);
-    if (w == 0) break;
+    if (w == 0) {
+      Serial.printf("[ERR] Chunk %d: Write stalled at %u/%u bytes\n", chunkIndex, written, len);
+      break;
+    }
     written += w;
     ptr += w;
     remaining -= w;
+
+    delay(2);
   }
 
   if (written != len) {
@@ -470,6 +502,7 @@ static bool finalizeUpload(const String &transferId) {
   String req =
       String("POST /upload/finalize HTTP/1.1\r\n") +
       "Host: " + SERVER_HOST + ":" + String(SERVER_PORT) + "\r\n" +
+      getAuthHeader() +
       "Connection: close\r\n" +
       "Content-Type: application/json\r\n" +
       "Content-Length: " + String(payload.length()) + "\r\n\r\n" +
@@ -481,7 +514,16 @@ static bool finalizeUpload(const String &transferId) {
 }
 
 static bool uploadImageResumable(camera_fb_t *fb, int cycleId) {
-  if (!fb || !fb->buf || fb->len == 0) return false;
+  if (!fb || !fb->buf || fb->len == 0) {
+    Serial.println("[ERR] Invalid frame buffer");
+    return false;
+  }
+
+  // Проверка доступности WiFi перед загрузкой
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[ERR] WiFi disconnected before upload");
+    return false;
+  }
 
   uint32_t jpegCrc = crc32(fb->buf, fb->len);
   int chunkCount = (fb->len + CHUNK_SIZE - 1) / CHUNK_SIZE;
@@ -496,6 +538,11 @@ static bool uploadImageResumable(camera_fb_t *fb, int cycleId) {
       Serial.printf("[UPLOAD] Init OK: transfer_id=%s resume_from=%d\n", transferId.c_str(), resumeFromChunk);
       break;
     }
+    // Проверка WiFi после каждой попытки
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[ERR] WiFi lost during upload init");
+      return false;
+    }
     if (attempt == UPLOAD_MAX_RETRIES) return false;
     delay(500 * attempt);
   }
@@ -503,6 +550,12 @@ static bool uploadImageResumable(camera_fb_t *fb, int cycleId) {
   uint32_t uploadStart = ms();
   for (int i = resumeFromChunk; i < chunkCount; i++) {
     esp_task_wdt_reset();
+
+    // Проверка WiFi перед каждым чанком
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.printf("[ERR] WiFi lost at chunk %d\n", i);
+      return false;
+    }
 
     size_t offset = (size_t)i * CHUNK_SIZE;
     size_t chunkLen = (offset + CHUNK_SIZE <= fb->len) ? CHUNK_SIZE : (fb->len - offset);
@@ -536,10 +589,25 @@ static bool uploadImageResumable(camera_fb_t *fb, int cycleId) {
       Serial.println("[UPLOAD] Finalized OK");
       return true;
     }
+    // Проверка WiFi перед каждой попыткой финализации
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[ERR] WiFi lost during finalize");
+      return false;
+    }
     delay(500 * attempt);
   }
 
+  Serial.println("[ERR] Upload finalize failed after all retries");
   return false;
+}
+
+// ------------------- Memory Diagnostics -------------------
+static void printHeapInfo(const char* location) {
+  Serial.printf("[MEM] %s: Free heap=%u Min free=%u PSRAM free=%u\n", 
+                location, 
+                ESP.getFreeHeap(), 
+                ESP.getMinFreeHeap(),
+                ESP.getFreePsram());
 }
 
 // ------------------- Main -------------------
@@ -556,28 +624,46 @@ void setup() {
   esp_task_wdt_add(NULL);
 
   blinkStatus(2, 120, 120);
-  startCameraOV5640();
+  
+  // Диагностика памяти при старте
+  printHeapInfo("BOOT");
+  
+  startCameraOV2640(); // <-- Вызов исправленной функции
+  printHeapInfo("AFTER_CAMERA_INIT");
 
   uint32_t tBoot = ms();
 
   uint32_t t0 = ms();
-  if (!connectWiFi(WIFI_TIMEOUT_MS)) goToSleep(FAIL_SLEEP_SEC);
+  if (!connectWiFi(WIFI_TIMEOUT_MS)) {
+    Serial.println("[ERR] WiFi failed, going to sleep");
+    goToSleep(FAIL_SLEEP_SEC);
+  }
   Serial.printf("[TIMING] wifi_connect=%u ms rssi=%d\n", (ms() - t0), WiFi.RSSI());
+  printHeapInfo("AFTER_WIFI");
 
   // SNTP необязателен (не прерываем программу при неудаче)
   t0 = ms();
   bool timeOk = syncTimeSNTP();
   Serial.printf("[TIMING] sntp=%u ms ok=%s\n", (ms() - t0), timeOk ? "true" : "false");
+  printHeapInfo("AFTER_SNTP");
 
   int cycleId = -1, captureDelayMs = -1;
   t0 = ms();
-  if (!postHello(cycleId, captureDelayMs)) goToSleep(FAIL_SLEEP_SEC);
+  if (!postHello(cycleId, captureDelayMs)) {
+    Serial.println("[ERR] postHello failed, going to sleep");
+    goToSleep(FAIL_SLEEP_SEC);
+  }
   Serial.printf("[TIMING] hello=%u ms cycle_id=%d capture_delay=%d\n", (ms() - t0), cycleId, captureDelayMs);
+  printHeapInfo("AFTER_HELLO");
 
   int cmdCaptureDelayMs = -1;
   t0 = ms();
-  if (!waitCmd(cycleId, cmdCaptureDelayMs)) goToSleep(FAIL_SLEEP_SEC);
+  if (!waitCmd(cycleId, cmdCaptureDelayMs)) {
+    Serial.println("[ERR] waitCmd failed, going to sleep");
+    goToSleep(FAIL_SLEEP_SEC);
+  }
   Serial.printf("[TIMING] waitcmd=%u ms capture_delay=%d\n", (ms() - t0), cmdCaptureDelayMs);
+  printHeapInfo("AFTER_WAITCMD");
 
   // Синхронная съёмка
   int waitMs = cmdCaptureDelayMs;
@@ -590,26 +676,34 @@ void setup() {
   camera_fb_t *fb = esp_camera_fb_get();
   uint32_t captureMs = ms() - t0;
 
+  delay(250);
+
   if (!fb) {
-    Serial.println("[ERR] Capture FAILED");
+    Serial.println("[ERR] Capture FAILED - no frame buffer");
+    printHeapInfo("CAPTURE_FAILED");
     goToSleep(FAIL_SLEEP_SEC);
   }
   Serial.printf("[TIMING] capture=%u ms jpeg_bytes=%u\n", captureMs, fb->len);
+  printHeapInfo("AFTER_CAPTURE");
 
   bool uploaded = uploadImageResumable(fb, cycleId);
   esp_camera_fb_return(fb);
+  printHeapInfo("AFTER_UPLOAD_RETURN");
 
   if (!uploaded) {
-    Serial.println("[ERR] Upload FAILED");
+    Serial.println("[ERR] Upload FAILED - going to sleep");
     goToSleep(FAIL_SLEEP_SEC);
   }
 
   bool sleepFlag = false;
   t0 = ms();
-  waitAck(cycleId, sleepFlag);
+  if (!waitAck(cycleId, sleepFlag)) {
+    Serial.println("[WARN] waitAck failed, but continuing to sleep");
+  }
   Serial.printf("[TIMING] waitack=%u ms sleep=%s\n", (ms() - t0), sleepFlag ? "true" : "false");
 
   Serial.printf("[TIMING] total_awake=%u ms\n", (ms() - tBoot));
+  printHeapInfo("BEFORE_SLEEP");
   digitalWrite(STATUS_LED_GPIO, HIGH);
   goToSleep(CAPTURE_PERIOD_SEC);
 }

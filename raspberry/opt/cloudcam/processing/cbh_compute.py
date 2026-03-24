@@ -1,118 +1,80 @@
-# /opt/cloudcam/processing/cbh_compute.py
 import cv2 as cv
 import numpy as np
 from pathlib import Path
-import yaml, json, csv, time
+import yaml, json, csv
 from datetime import datetime
 
 CFG = json.loads(Path("/opt/cloudcam/processing/config.json").read_text(encoding="utf-8"))
-
 STORAGE_DIR = Path(CFG["storage_dir"])
-CAM_L = CFG["cam_left"]
-CAM_R = CFG["cam_right"]
-CALIB_YAML = Path(CFG["calib_dir"]) / "stereo_fisheye.yml"
-MIN_H = float(CFG["min_height_m"])
-MAX_H = float(CFG["max_height_m"])
-ROI_CENTER_FRAC = float(CFG["roi_center_frac"])
+CAM_L, CAM_R = CFG["cam_left"], CFG["cam_right"] # Предположим: cam120 и cam160
+CALIB_YAML = Path(CFG["calib_dir"]) / "stereo.yml"
 CSV_PATH = Path(CFG["result_csv"])
-JSONL_PATH = Path(CFG["result_jsonl"])
 
 def load_calib():
     data = yaml.safe_load(CALIB_YAML.read_text(encoding="utf-8"))
-    K1 = np.array(data["K1"], dtype=np.float64)
-    D1 = np.array(data["D1"], dtype=np.float64)
-    K2 = np.array(data["K2"], dtype=np.float64)
-    D2 = np.array(data["D2"], dtype=np.float64)
-    R1 = np.array(data["R1"], dtype=np.float64)
-    R2 = np.array(data["R2"], dtype=np.float64)
-    P1 = np.array(data["P1"], dtype=np.float64)
-    P2 = np.array(data["P2"], dtype=np.float64)
-    Q = np.array(data["Q"], dtype=np.float64)
-    return (K1, D1, K2, D2, R1, R2, P1, P2, Q, data)
+    return (np.array(data["K1"]), np.array(data["D1"]), np.array(data["K2"]), np.array(data["D2"]),
+            np.array(data["R1"]), np.array(data["R2"]), np.array(data["P1"]), np.array(data["P2"]))
 
-def last_pairs():
-    dL = STORAGE_DIR / CAM_L
-    dR = STORAGE_DIR / CAM_R
-    filesL = sorted(dL.glob("*.jpg"))
-    filesR = sorted(dR.glob("*.jpg"))
-    by_cycle_L = {}
-    for p in filesL:
-        stem = p.stem  # <cycle>_<ts>
-        cyc = stem.split("_")[0]
-        by_cycle_L[cyc] = p
-    pairs = []
-    for p in filesR:
-        cyc = p.stem.split("_")[0]
-        if cyc in by_cycle_L:
-            pairs.append((int(cyc), by_cycle_L[cyc], p))
-    pairs.sort(key=lambda x: x[0])
-    return pairs
-
-def compute_cbh_for_pair(cycle_id, imgL_path, imgR_path, calib):
-    K1, D1, K2, D2, R1, R2, P1, P2, Q, meta = calib
+def compute_cbh_orb_multiscale(imgL_path, imgR_path, calib):
+    K1, D1, K2, D2, R1, R2, P1, P2 = calib
+    
     imgL = cv.imread(str(imgL_path), cv.IMREAD_GRAYSCALE)
     imgR = cv.imread(str(imgR_path), cv.IMREAD_GRAYSCALE)
-    if imgL is None or imgR is None:
+    if imgL is None or imgR is None: return None
+
+    # 1. Поиск масштабно-инвариантных признаков ORB
+    # Увеличиваем количество точек для облаков
+    orb = cv.ORB_create(nfeatures=5000, scaleFactor=1.2, nlevels=8)
+    kp1, des1 = orb.detectAndCompute(imgL, None)
+    kp2, des2 = orb.detectAndCompute(imgR, None)
+
+    if des1 is None or des2 is None or len(des1) < 10 or len(des2) < 10:
         return None
 
-    h, w = imgL.shape
-    # rectification maps
-    map1x, map1y = cv.fisheye.initUndistortRectifyMap(K1, D1, R1, P1[:, :3], (w, h), cv.CV_32FC1)
-    map2x, map2y = cv.fisheye.initUndistortRectifyMap(K2, D2, R2, P2[:, :3], (w, h), cv.CV_32FC1)
-    rL = cv.remap(imgL, map1x, map1y, interpolation=cv.INTER_LINEAR)
-    rR = cv.remap(imgR, map2x, map2y, interpolation=cv.INTER_LINEAR)
-
-    # ORB features
-    orb = cv.ORB_create(2000)
-    kptsL, desL = orb.detectAndCompute(rL, None)
-    kptsR, desR = orb.detectAndCompute(rR, None)
-    if desL is None or desR is None:
-        return None
+    # 2. Кросс-сопоставление (поиск одинаковых участков облака на 12мм и 16мм)
     bf = cv.BFMatcher(cv.NORM_HAMMING, crossCheck=True)
-    matches = bf.match(desL, desR)
-    if len(matches) < 30:
+    matches = bf.match(des1, des2)
+    
+    # Отбираем только надежные совпадения по дистанции Хэмминга
+    matches = sorted(matches, key=lambda x: x.distance)
+    good_matches = matches[:int(len(matches) * 0.5)] # Берем 50% лучших
+
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
+
+    if len(pts1) < 20: return None
+
+    # 3. Жесткая геометрическая фильтрация (RANSAC)
+    # Отсеивает точки, которые сместились "не по законам физики" стереопары
+    F, mask = cv.findFundamentalMat(pts1, pts2, cv.FM_RANSAC, 3.0, 0.99)
+    if mask is None: return None
+    
+    pts1_inliers = pts1[mask.ravel() == 1]
+    pts2_inliers = pts2[mask.ravel() == 1]
+
+    # 4. Устранение дисторсии и перевод в идеальную плоскость камер
+    # Важно: используем P1 и P2 из калибровки для правильного стерео-выравнивания
+    pts1_undist = cv.undistortPoints(pts1_inliers.reshape(-1, 1, 2), K1, D1, R=R1, P=P1)
+    pts2_undist = cv.undistortPoints(pts2_inliers.reshape(-1, 1, 2), K2, D2, R=R2, P=P2)
+
+    # 5. Триангуляция в 3D пространство (магия вычисления высоты)
+    # cv.triangulatePoints возвращает 4D однородные координаты
+    pts4D = cv.triangulatePoints(P1, P2, pts1_undist.reshape(2, -1), pts2_undist.reshape(2, -1))
+    
+    # Перевод в обычные 3D координаты (X, Y, Z) в метрах
+    pts3D = pts4D[:3, :] / pts4D[3, :]
+
+    # 6. Извлечение высоты (Ось Z!)
+    Z = pts3D[2, :]
+    
+    # Фильтруем физически невозможные значения (например, отрицательную высоту)
+    valid_Z = Z[(Z > 100) & (Z < 10000)] # от 100 м до 10 км
+
+    if len(valid_Z) < 10: # Слишком мало валидных точек для принятия решения
         return None
 
-    matches = sorted(matches, key=lambda m: m.distance)[:500]
-    ptsL = np.float32([kptsL[m.queryIdx].pt for m in matches])
-    ptsR = np.float32([kptsR[m.trainIdx].pt for m in matches])
-
-    # Триангуляция (в прямоугольной системе после rectification)
-    # Построим проекционные матрицы
-    P1_ = P1
-    P2_ = P2
-    ptsL_h = cv.convertPointsToHomogeneous(ptsL)[:, 0, :]
-    ptsR_h = cv.convertPointsToHomogeneous(ptsR)[:, 0, :]
-    pts4d = cv.triangulatePoints(P1_, P2_, ptsL.T, ptsR.T)
-    pts3d = (pts4d[:3, :] / pts4d[3, :]).T  # (N,3)
-
-    # Координаты: X,Y,Z в системе rectified (оси зависят от R,T), нам нужна "высота".
-    # При зените и симметричной геометрии можно принять Z как "вдоль луча", Y как "вертикаль" условно.
-    # В отсутствии точной ориентации берём модуль высоты как компонент с минимальной дисперсией у земли.
-    Z = pts3d[:, 2]
-    Y = pts3d[:, 1]
-
-    # Грубый фильтр по расстоянию: облака должны быть дальше определённого радиуса
-    dist = np.linalg.norm(pts3d, axis=1)
-    mask = (dist > MIN_H) & (dist < 50000)
-    pts3d = pts3d[mask]
-    Y = pts3d[:, 1]
-
-    if len(Y) < 30:
-        return None
-
-    # Оценка "высоты": берём отрицательную/положительную ось в зависимости от кластера
-    medianY = np.median(Y)
-    if abs(medianY) < 1e-3:
-        return None
-
-    # Примем признак: облака "сверху" относительно камеры -> выбираем >= некоторого порога
-    # Здесь упрощённо: ВНГО ≈ нижний перцентиль по |Y|
-    Yabs = np.abs(Y)
-    vnogo = float(np.percentile(Yabs, 10))
-    if vnogo < MIN_H or vnogo > MAX_H:
-        return None
-
+    # ВНГО (Нижняя граница облачности) - это 10-й перцентиль самых низких точек
+    vnogo = float(np.percentile(valid_Z, 10))
     return vnogo
 
 def append_result(cycle_id, vnogo_m):

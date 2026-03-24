@@ -8,7 +8,7 @@ Type=simple
 User=pi
 WorkingDirectory=/opt/cloudcam/server
 Environment="PYTHONUNBUFFERED=1"
-ExecStart=/usr/bin/gunicorn -w 2 -b 0.0.0.0:8000 app:app
+ExecStart=/usr/bin/gunicorn -w 1 --threads 4 -b 0.0.0.0:8000 app:app
 Restart=on-failure
 RestartSec=2
 

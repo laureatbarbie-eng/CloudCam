@@ -3,6 +3,7 @@
   "listen_port": 8000,
   "cam_ids": ["cam120", "cam160"],
   "capture_period_sec": 600,
-  "capture_lead_ms": 800,
-  "storage_dir": "/var/lib/cloudcam"
+  "capture_lead_ms": 1500,
+  "storage_dir": "/var/lib/cloudcam",
+  "api_token": "SecretCloudToken123"
 }
