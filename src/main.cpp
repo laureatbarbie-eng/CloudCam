@@ -324,7 +324,7 @@ static void startCameraOV2640() {
   }
   
   Serial.println("[OK] OV2640 initialized");
-  Serial.printf("[INFO] Resolution: UXGA (1600x1200), Quality: 10, Buffers: 2, XCLK: 20MHz\n");
+  Serial.printf("[INFO] Resolution: UXGA (1600x1200), Quality: 10, Buffers: 2, XCLK: 10MHz\n");
 }
 
 // ------------------- API Calls -------------------
