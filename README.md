@@ -1,4 +1,4 @@
-# 📸 ESP32-CAM Автоматическая Фотосъемка с Загрузкой на Сервер 🌐
+# 📸 Скайр 🌐
 
 ![ESP32](https://img.shields.io/badge/ESP32-FF6600?style=for-the-badge&logo=espressif&logoColor=white)
 ![Arduino](https://img.shields.io/badge/Arduino-00979D?style=for-the-badge&logo=arduino&logoColor=white)
