@@ -10,7 +10,7 @@ OUT_YAML = Path(f"/opt/cloudcam/processing/calib_out/{CAM_ID}_fisheye.yml")
 
 # параметры шахматки
 CHECKERBOARD = (9, 6)  # внутренние углы
-SQUARE_SIZE_M = 0.03   # 3 см, если так печатали
+SQUARE_SIZE_M = 0.028   # 3 см, если так печатали
 
 def main():
     images = sorted(IMG_DIR.glob("*.jpg"))
