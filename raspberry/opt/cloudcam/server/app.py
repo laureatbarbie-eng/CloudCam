@@ -17,15 +17,22 @@ CAPTURE_LEAD_MS = int(cfg["capture_lead_ms"])
 STORAGE_DIR = Path(cfg["storage_dir"])
 API_TOKEN = cfg.get("api_token", "SecretCloudToken123")
 
+# КОНФИГ ОЖИДАЕМЫХ КАДРОВ
+EXPECTED_FRAMES = {
+    "cam120": 1,
+    "cam160": 1,
+    "cam180_sky": 2  # Наша новая камера делает 2 снимка (burst)
+}
+
 LOCK = threading.Lock()
 state = {
     "cycle_id": 0,
     "cycle_start": time.time(),
     "hello": set(),
-    "received": set(),
+    "received_counts": {cam: 0 for cam in CAM_IDS}, # Учет КОЛИЧЕСТВА кадров
     "cmd": None,
     "cmd_ts": None,
-    "transfers": {} # Для управления загрузкой чанков
+    "transfers": {} 
 }
 
 def now_ms() -> int:
@@ -40,7 +47,7 @@ def new_cycle():
     state["cycle_id"] += 1
     state["cycle_start"] = time.time()
     state["hello"] = set()
-    state["received"] = set()
+    state["received_counts"] = {cam: 0 for cam in CAM_IDS}
     state["cmd"] = None
     state["cmd_ts"] = None
     state["transfers"].clear()
@@ -84,8 +91,6 @@ def waitcmd():
                 return jsonify(state["cmd"])
         time.sleep(0.05)
     return jsonify(type="WAIT", cycle_id=state["cycle_id"])
-
-# --- Исправленный блок загрузки ---
 
 @app.post("/upload/init")
 def upload_init():
@@ -132,7 +137,8 @@ def upload_finalize():
         if not t: return jsonify(error="Invalid TID"), 400
         
         cam_id = t["cam_id"]
-        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        # Добавили микросекунды, чтобы 2 кадра burst-съемки не перезаписали друг друга
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S_%f")
         base = f"{t['cycle_id']}_{ts}"
         
         final_jpg = cycle_dir(cam_id) / f"{base}.jpg"
@@ -141,12 +147,11 @@ def upload_finalize():
         os.rename(t["file_path"], final_jpg)
         final_json.write_text(json.dumps(t["meta"], indent=2), encoding="utf-8")
         
-        state["received"].add(cam_id)
+        # Увеличиваем счетчик полученных кадров для этой камеры
+        state["received_counts"][cam_id] = state["received_counts"].get(cam_id, 0) + 1
         del state["transfers"][tid]
         
     return jsonify(status="ok")
-
-# ----------------------------------
 
 @app.get("/waitack")
 def waitack():
@@ -157,7 +162,13 @@ def waitack():
             if cycle_id != state["cycle_id"]:
                 return jsonify(type="NEWCYCLE", cycle_id=state["cycle_id"], sleep=False)
 
-            complete = (state["received"] == set(CAM_IDS))
+            # Проверка: все ли камеры загрузили необходимое количество кадров?
+            complete = True
+            for cid in CAM_IDS:
+                if state["received_counts"].get(cid, 0) < EXPECTED_FRAMES.get(cid, 1):
+                    complete = False
+                    break
+
             timed_out = (state["cmd_ts"] is not None and (time.time() - state["cmd_ts"] > 70.0))
 
             if complete or timed_out:
