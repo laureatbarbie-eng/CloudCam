@@ -21,7 +21,7 @@ API_TOKEN = cfg.get("api_token", "SecretCloudToken123")
 EXPECTED_FRAMES = {
     "cam120": 1,
     "cam160": 1,
-    "cam180_sky": 2  # Наша новая камера делает 2 снимка (burst)
+    "cam180": 2  # Наша новая камера делает 2 снимка (burst)
 }
 
 LOCK = threading.Lock()
