@@ -7,11 +7,11 @@
 #include <HTTPUpdate.h> // ДОБАВЛЕНО для OTA
 
 // ------------------- CONFIG -------------------
-static const char* WIFI_SSID = "Raspberry";
-static const char* WIFI_PASS = "12345678";
+static const char* WIFI_SSID = "CloudCamAP";
+static const char* WIFI_PASS = "cloudcam2024";
 static const char* SERVER_HOST = "192.168.4.1";
 static const uint16_t SERVER_PORT = 8000;
-static const char* CAM_ID = "cam160";
+static const char* CAM_ID = "cam120";
 
 // ДОБАВЛЕНО: API Токен для авторизации на сервере
 static const char* API_TOKEN = "SecretCloudToken123";
