@@ -6,8 +6,8 @@
 #  Запуск: sudo bash deploy_cloudcam.sh [параметры]
 #
 #  Параметры:
-#    --ssid   ИМЯ     SSID точки доступа    (по умолчанию: CloudCamAP)
-#    --pass   ПАРОЛЬ  Пароль AP             (по умолчанию: cloudcam2024)
+#    --ssid   ИМЯ     SSID точки доступа    (по умолчанию: Raspberry)
+#    --pass   ПАРОЛЬ  Пароль AP             (по умолчанию: 12345678)
 #    --ip     IP      IP-адрес AP           (по умолчанию: 192.168.4.1)
 #    --user   ИМЯ     Пользователь          (по умолчанию: $SUDO_USER)
 #    --wifi   IFACE   AP-интерфейс          (по умолчанию: wlan1)
@@ -40,8 +40,8 @@ step()    {
 
 # ─── Параметры по умолчанию ────────────────────────────────────────────────
 SCRIPT_VERSION="5.0"
-AP_SSID="CloudCamAP"
-AP_PASS="cloudcam2024"
+AP_SSID="Raspberry"
+AP_PASS="12345678"
 AP_IP="192.168.4.1"
 AP_CHANNEL="6"
 AP_IFACE="wlan1"      # USB MT7612U; wlan0 — встроенный, остаётся клиентом
@@ -228,7 +228,7 @@ rm -rf "$TMP_REPO"
 success "Raspberry-часть репозитория разложена в ${INSTALL_DIR} и ${DATA_DIR}"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "ФАЗА 1 · ШАГ 3/4 — Python venv + offline pip"
+step "ФАЗА 1 · ШАГ 3/4 — Python venv + wheelhouse + offline pip"
 # ─────────────────────────────────────────────────────────────────────────────
 
 WHEEL_DIR="${INSTALL_DIR}/vendor/wheels"
@@ -254,9 +254,13 @@ else
   error "cv2 не найден в venv. Проверьте python3-opencv: dpkg -l python3-opencv"
 fi
 
-# Проверяем наличие локальных wheel-файлов
-[[ -d "$WHEEL_DIR" ]] || error "Не найдена папка с wheel-пакетами: $WHEEL_DIR"
-[[ -f "$REQ_OFFLINE" ]] || error "Не найден файл: $REQ_OFFLINE"
+# Строго оффлайн: wheelhouse и список пакетов должны приехать вместе с репозиторием.
+# В этой среде pip download может быть недоступен (например, требуется VPN), поэтому
+# не пытаемся скачивать зависимости автоматически.
+[[ -f "$REQ_OFFLINE" ]] || error "Не найден файл оффлайн-зависимостей: $REQ_OFFLINE"
+[[ -d "$WHEEL_DIR" ]] || error "Не найдена директория wheelhouse: $WHEEL_DIR"
+find "$WHEEL_DIR" -maxdepth 1 -name '*.whl' | grep -q . || \
+  error "В $WHEEL_DIR нет .whl. Добавьте wheel-пакеты в репозиторий заранее."
 
 # Обновление pip/setuptools/wheel оффлайн, если такие wheel уже есть
 info "Пробуем оффлайн-обновление pip/setuptools/wheel..."
@@ -279,7 +283,7 @@ success "Python-пакеты установлены из локальной па
 info "Проверка импортов в venv..."
 FAILED_IMPORTS=()
 
-for mod in cv2 flask gunicorn nicegui numpy scipy yaml requests PIL matplotlib pandas websockets aiohttp watchdog; do
+for mod in cv2 flask gunicorn nicegui numpy scipy yaml requests PIL matplotlib pandas websockets aiohttp watchdog psutil; do
   if "$PYTHON" -c "import ${mod}" 2>/dev/null; then
     info "  ✓ ${mod}"
   else
@@ -655,11 +659,11 @@ UNIT
 
 cat > /etc/systemd/system/cloudcam-compute.timer <<UNIT
 [Unit]
-Description=CloudCam CBH Compute каждые 10 мин
+Description=CloudCam CBH Compute каждые 2 мин
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=10min
+OnUnitActiveSec=2min
 AccuracySec=30s
 
 [Install]
@@ -668,6 +672,8 @@ UNIT
 
 systemctl daemon-reload
 systemctl enable cloudcam-server cloudcam-gui cloudcam-compute.timer
+systemctl start cloudcam-server cloudcam-gui cloudcam-compute.timer || \
+  warn "Не удалось сразу запустить cloudcam-* сервисы, они будут подняты после перезагрузки"
 success "Systemd-сервисы зарегистрированы"
 
 # ─────────────────────────────────────────────────────────────────────────────
